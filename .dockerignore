@@ -1,3 +1,4 @@
+# Allow only build inputs; local artifacts and development tooling are excluded.
 **
 !Cargo.toml
 !Cargo.lock

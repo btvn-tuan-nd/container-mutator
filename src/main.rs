@@ -1,7 +1,21 @@
-fn main() {
-    println!("mutator: started; updater functionality is not implemented");
+mod boot;
+mod cli;
+mod launch;
+mod state;
 
-    loop {
-        std::thread::park();
+use clap::Parser;
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let result = match cli::Cli::parse().command {
+        cli::Action::Boot { command } => boot::boot(command),
+        cli::Action::Launch => launch::launch(),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mutator: {error:#}");
+            ExitCode::FAILURE
+        }
     }
 }

@@ -1,7 +1,9 @@
 services:
   mutator:
-    build: .
-    image: localhost:5000/mutator:dev
+    build:
+      context: .
+      target: final
+    image: localhost:5000/container-mutator:dev
 
   registry:
     image: registry:3
