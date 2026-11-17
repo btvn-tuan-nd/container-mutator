@@ -1,4 +1,0 @@
-#!/command/execlineb -P
-/command/with-contenv /command/s6-notifyoncheck -d -s 3000 -T 30000 -t 5000 -w 250 -n 0
-/command/cd /app
-/app/run

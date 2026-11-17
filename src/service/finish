@@ -1,0 +1,18 @@
+#!/command/with-contenv /bin/sh
+# s6 provides the exited service's process-group leader as argument 4.
+case "${4:-}" in
+    ''|0|1|*[!0-9]*)
+        echo 'mutator: s6 did not provide a safe process group; refusing cleanup' >&2
+        while :; do /command/s6-sleep 1; done ;;
+esac
+kill -KILL -"$4" 2>/dev/null || :
+while kill -0 -"$4" 2>/dev/null; do
+    /command/s6-sleep -m 10
+done
+# Never report down-ready until detached-process cleanup succeeds.
+while ! ./data/dispatch cleanup; do
+    echo 'mutator: custom cleanup failed; retrying before allowing a switch' >&2
+    /command/s6-sleep 1
+done
+[ -e /run/mutator/trial ] && exit 125
+exit 0

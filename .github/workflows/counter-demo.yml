@@ -18,11 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
+      - name: Build the current single-app preset
+        run: docker build --target artifact --output type=local,dest=dist/amd64 .
       - name: Publish and exercise counter updates
         env:
           GH_TOKEN: ${{ github.token }}
           GH_USER: ${{ github.actor }}
           GH_OWNER: ${{ github.repository_owner }}
+          MUTATOR_ARCHIVE: ${{ github.workspace }}/dist/amd64/container-mutator-single-app-linux-amd64.tar.gz
         run: |
           set -eu
           export DOCKER_CONFIG=$(mktemp -d)

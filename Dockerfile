@@ -4,7 +4,7 @@
 #
 # Targets:
 #   final     (default) Alpine convenience image with pinned s6-overlay and /init.
-#   artifact  local export: raw `mutator`, integration tarball, SHA256SUMS.
+#   artifact  local export: raw `mutator`, integration and single-app tarballs, SHA256SUMS.
 #   overlay   scratch image with only the integration root.
 #
 # Install the integration artifact into an existing s6-overlay image.
@@ -63,6 +63,21 @@ RUN set -eux; \
     find /root/opt/mutator/share/licenses -type d -exec chmod 0755 {} \; ; \
     find /root/opt/mutator/share/licenses -type f -exec chmod 0644 {} \;
 
+# Single-app preset shares its service templates with install-service.
+FROM integration AS single-app
+COPY src/service/ /root/etc/s6-overlay/s6-rc.d/mutator-app/
+RUN set -eux; \
+    service=/root/etc/s6-overlay/s6-rc.d/mutator-app; \
+    find "$service" -type d -exec chmod 0755 {} \; ; \
+    find "$service" -type f -exec chmod 0644 {} \; ; \
+    chmod 0755 "$service/run" "$service/finish" "$service/data/launch" "$service/data/check" "$service/data/dispatch"; \
+    touch "$service/data/preset"; \
+    bundles=/root/etc/s6-overlay/user-bundles.d; \
+    mkdir -p "$bundles/mutable-app/contents.d" "$bundles/user2/contents.d" /root/etc/mutator; \
+    printf 'bundle\n' > "$bundles/mutable-app/type"; \
+    printf 'bundle\n' > "$bundles/user2/type"; \
+    touch "$bundles/mutable-app/contents.d/mutator-app" "$bundles/user2/contents.d/mutable-app"
+
 FROM scratch AS overlay
 COPY --from=integration /root/ /
 
@@ -93,13 +108,15 @@ FROM alpine:3.22 AS export
 ARG TARGETARCH
 COPY --from=build /out/mutator /mutator
 COPY --from=integration /root/ /integration/
+COPY --from=single-app /root/ /single-app/
 RUN set -eux; \
     mkdir -p /out; \
     tarball="container-mutator-integration-linux-${TARGETARCH}.tar.gz"; \
     tar -C /integration -czf "/out/${tarball}" .; \
+    tar -C /single-app -czf "/out/container-mutator-single-app-linux-${TARGETARCH}.tar.gz" .; \
     cp /mutator /out/mutator; \
     cd /out; \
-    sha256sum "$tarball" mutator > SHA256SUMS
+    sha256sum *.tar.gz mutator > SHA256SUMS
 
 FROM scratch AS artifact
 COPY --from=export /out/ /

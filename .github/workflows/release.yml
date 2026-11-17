@@ -1,8 +1,8 @@
-# Publish s6-overlay-style integration tarballs on every tag.
+# Publish s6-overlay-style integration and single-app tarballs on every tag.
 #
 # Consumers install with one line: ADD container-mutator-integration-linux-amd64.tar.gz /
 #
-# The Dockerfile's `artifact` target produces the tarball, the raw binary, and
+# The Dockerfile's `artifact` target produces both tarballs, the raw binary, and
 # SHA256SUMS. We only rename and attach them to the GitHub release; the build
 # itself (including pinned crane and license files) stays in the Dockerfile.
 name: release
@@ -44,7 +44,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build integration tarball
+      - name: Build integration and single-app tarballs
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -60,9 +60,11 @@ jobs:
           cd "dist/${{ matrix.arch }}"
           mv mutator "mutator-linux-${{ matrix.arch }}"
           sha256sum "container-mutator-integration-linux-${{ matrix.arch }}.tar.gz" \
+            "container-mutator-single-app-linux-${{ matrix.arch }}.tar.gz" \
             "mutator-linux-${{ matrix.arch }}" > "SHA256SUMS-${{ matrix.arch }}"
           gh release upload "${GITHUB_REF_NAME}" \
             "container-mutator-integration-linux-${{ matrix.arch }}.tar.gz" \
+            "container-mutator-single-app-linux-${{ matrix.arch }}.tar.gz" \
             "mutator-linux-${{ matrix.arch }}" \
             "SHA256SUMS-${{ matrix.arch }}" \
             --clobber

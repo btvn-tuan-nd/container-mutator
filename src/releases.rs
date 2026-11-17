@@ -21,6 +21,8 @@ pub fn ensure_space(path: &Path, bytes: u64) -> Result<()> {
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     pub version: u32,
+    #[serde(default = "crate::paths::default_app_dir")]
+    pub app_dir: PathBuf,
     pub active: String,
     pub previous: Option<String>,
     pub digest: Option<String>,
@@ -40,16 +42,63 @@ pub struct Store {
     root: PathBuf,
 }
 
-impl Default for Store {
-    fn default() -> Self {
-        Self {
-            app: "/app".into(),
-            root: "/var/lib/mutator".into(),
-        }
-    }
-}
-
 impl Store {
+    pub fn new(app: PathBuf) -> Result<Self> {
+        crate::paths::validate(&app)?;
+        let app: PathBuf = app.components().collect();
+        crate::paths::validate_parent(&app)?;
+        crate::paths::validate_parent(Path::new(crate::paths::STORE))?;
+        match fs::symlink_metadata(crate::paths::STORE) {
+            Ok(metadata) => ensure!(
+                metadata.is_dir(),
+                "release storage must be a real directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("cannot inspect release storage"),
+        }
+        crate::paths::ensure_no_mounts(&app)?;
+        let executable = std::env::current_exe()?;
+        ensure!(
+            !executable.starts_with(&app),
+            "application directory contains the running updater"
+        );
+        Ok(Self {
+            app,
+            root: crate::paths::STORE.into(),
+        })
+    }
+
+    /// Bind before moving bootstrap, so even a crash before selection.json
+    /// cannot let a later boot reuse this store for a different directory.
+    fn bind_app_dir(&self) -> Result<()> {
+        let binding = self.root.join("app-dir.json");
+        if binding.exists() {
+            let recorded: PathBuf = serde_json::from_slice(&fs::read(binding)?)?;
+            ensure!(
+                recorded == self.app,
+                "MUTATOR_APP_DIR changed after initialization: stored {}, configured {}",
+                recorded.display(),
+                self.app.display()
+            );
+            return Ok(());
+        }
+        if self.root.join("selection.json").exists() {
+            self.load()?; // Validate legacy state before binding it.
+        } else if self.release("bootstrap")?.exists() {
+            // Old versions could leave bootstrap without a journal.
+            ensure!(
+                self.app == crate::paths::default_app_dir(),
+                "unbound bootstrap belongs to legacy /app; recover it before changing directories"
+            );
+        }
+        let mut temporary = NamedTempFile::new_in(&self.root)?;
+        serde_json::to_writer(&mut temporary, &self.app)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist_noclobber(binding)?;
+        File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+
     fn release(&self, name: &str) -> Result<PathBuf> {
         ensure!(
             crate::lifecycle::safe_name(name)
@@ -59,7 +108,7 @@ impl Store {
         Ok(self.root.join(name).join("app"))
     }
 
-    /// Only opt-in update mode changes /app. Bootstrap can resume after a process crash.
+    /// Only opt-in update mode changes the application directory. Bootstrap can resume after a process crash.
     pub fn initialize(&self) -> Result<()> {
         fs::DirBuilder::new()
             .recursive(true)
@@ -71,20 +120,26 @@ impl Store {
         );
         ensure!(
             fs::metadata(&self.root)?.dev()
-                == fs::metadata(self.app.parent().context("/app has no parent")?)?.dev(),
+                == fs::metadata(
+                    self.app
+                        .parent()
+                        .context("application directory has no parent")?
+                )?
+                .dev(),
             "release storage must be on the container's writable filesystem"
         );
+        self.bind_app_dir()?;
         if !self.root.join("selection.json").exists() {
             let bootstrap = self.release("bootstrap")?;
             if !bootstrap.exists() {
                 ensure!(
                     fs::symlink_metadata(&self.app)?.file_type().is_dir(),
-                    "update mode requires /app to be a real directory, not a symlink"
+                    "update mode requires the application path to be a real directory, not a symlink"
                 );
                 fs::create_dir_all(bootstrap.parent().unwrap())?;
                 if let Err(error) = fs::rename(&self.app, &bootstrap) {
                     if error.kind() != std::io::ErrorKind::CrossesDevices {
-                        return Err(error).context("cannot move /app into release storage");
+                        return Err(error).context("cannot move application into release storage");
                     }
                     // OverlayFS may refuse to rename a lower-layer directory.
                     // Copy before publishing, so a crash never selects a partial tree.
@@ -93,7 +148,7 @@ impl Store {
                         .arg(&self.app)
                         .arg(staged.path().join("app"))
                         .status()
-                        .context("cannot copy bootstrap /app")?;
+                        .context("cannot copy bootstrap application")?;
                     ensure!(status.success(), "bootstrap copy failed: {status}");
                     sync_tree(&staged.path().join("app"))?;
                     fs::rename(staged.path().join("app"), &bootstrap)?;
@@ -106,6 +161,7 @@ impl Store {
             File::open(bootstrap.parent().unwrap())?.sync_all()?;
             self.save(&Selection {
                 version: 1,
+                app_dir: self.app.clone(),
                 active: "bootstrap".into(),
                 previous: None,
                 digest: None,
@@ -117,7 +173,8 @@ impl Store {
         // Metadata is committed before removing the original lower-layer tree.
         // This also resumes a bootstrap interrupted during that removal.
         if fs::symlink_metadata(&self.app).is_ok_and(|metadata| metadata.is_dir()) {
-            fs::remove_dir_all(&self.app).context("cannot replace original /app directory")?;
+            fs::remove_dir_all(&self.app)
+                .context("cannot replace original application directory")?;
         }
         self.activate(&selection.active)?;
         if selection.pending.is_some() {
@@ -144,6 +201,12 @@ impl Store {
         let state: Selection =
             serde_json::from_slice(&fs::read(self.root.join("selection.json"))?)?;
         ensure!(state.version == 1, "unsupported release state version");
+        ensure!(
+            state.app_dir == self.app,
+            "MUTATOR_APP_DIR does not match the release journal (stored {}, configured {})",
+            state.app_dir.display(),
+            self.app.display()
+        );
         ensure!(
             self.release(&state.active)?.is_dir(),
             "active release is missing"
@@ -184,20 +247,25 @@ impl Store {
         Ok(matches!(fs::read_link(&self.app), Ok(target) if target == self.release(name)?))
     }
 
-    /// Renaming a symlink in /app's parent atomically selects the release.
+    /// Renaming the application symlink atomically selects the release.
     pub fn activate(&self, name: &str) -> Result<()> {
         let target = self.release(name)?;
         ensure!(
             fs::symlink_metadata(&target)?.is_dir(),
-            "release /app must be a directory"
+            "release payload must be a directory"
         );
         let temporary = tempfile::Builder::new()
             .prefix(".switch-")
             .tempdir_in(&self.root)?;
         let link = temporary.path().join("app");
         symlink(&target, &link)?;
-        fs::rename(link, &self.app).context("cannot atomically replace /app symlink")?;
-        File::open(self.app.parent().context("/app has no parent")?)?.sync_all()?;
+        fs::rename(link, &self.app).context("cannot atomically replace application symlink")?;
+        File::open(
+            self.app
+                .parent()
+                .context("application directory has no parent")?,
+        )?
+        .sync_all()?;
         Ok(())
     }
 
@@ -354,6 +422,7 @@ mod tests {
         let (_root, store) = fixture();
         let bootstrap = store.release("bootstrap").unwrap();
         fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        store.bind_app_dir().unwrap();
         fs::rename(&store.app, &bootstrap).unwrap();
         store.initialize().unwrap();
         assert_eq!(
@@ -367,6 +436,8 @@ mod tests {
     fn bootstrap_copy_recovers_before_original_directory_is_removed() {
         let (_root, store) = fixture();
         let bootstrap = store.release("bootstrap").unwrap();
+        fs::create_dir_all(&store.root).unwrap();
+        store.bind_app_dir().unwrap();
         fs::create_dir_all(&bootstrap).unwrap();
         fs::write(bootstrap.join("version"), "complete copy").unwrap();
         store.initialize().unwrap();
@@ -390,5 +461,59 @@ mod tests {
         assert!(store.lock().is_err());
         drop(lock);
         let _next_owner = store.lock().unwrap();
+    }
+    #[test]
+    fn changing_destination_is_rejected_before_touching_the_new_tree() {
+        let (_root, store) = fixture();
+        store.initialize().unwrap();
+        let new_app = store.root.parent().unwrap().join("other-app");
+        fs::create_dir(&new_app).unwrap();
+        fs::write(new_app.join("keep"), "untouched").unwrap();
+        let changed = Store {
+            app: new_app.clone(),
+            root: store.root.clone(),
+        };
+        assert!(changed.initialize().is_err());
+        assert!(changed.load().is_err());
+        assert_eq!(
+            fs::read_to_string(new_app.join("keep")).unwrap(),
+            "untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(store.app.join("version")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn interrupted_bootstrap_is_bound_before_journal_exists() {
+        let (_root, store) = fixture();
+        fs::create_dir_all(&store.root).unwrap();
+        store.bind_app_dir().unwrap();
+        let bootstrap = store.release("bootstrap").unwrap();
+        fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        fs::rename(&store.app, &bootstrap).unwrap();
+        let changed = Store {
+            app: store.root.parent().unwrap().join("another"),
+            root: store.root.clone(),
+        };
+        assert!(changed.initialize().is_err());
+        store.initialize().unwrap();
+        assert_eq!(
+            fs::read_to_string(store.app.join("version")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn legacy_journal_defaults_to_app_and_cannot_be_retargeted() {
+        let state: Selection = serde_json::from_str(r#"{"version":1,"active":"bootstrap","previous":null,"digest":null,"rejected":null,"pending":null}"#).unwrap();
+        assert_eq!(state.app_dir, Path::new("/app"));
+        let (_root, store) = fixture();
+        store.initialize().unwrap();
+        let mut legacy = store.load().unwrap();
+        legacy.app_dir = crate::paths::default_app_dir();
+        store.save(&legacy).unwrap();
+        assert!(store.load().is_err());
     }
 }

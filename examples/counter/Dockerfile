@@ -6,35 +6,36 @@
 FROM alpine:3.22 AS app
 ARG NUMBER=1
 ARG HEALTHY=yes
-WORKDIR /app
-COPY run.sh /app/run
-RUN chmod 0755 /app/run \
-    && printf '%s\n' "$NUMBER" > /app/number \
-    && printf '%s\n' "$HEALTHY" > /app/healthy
+WORKDIR /srv/site
+RUN printf '%s\n' "$NUMBER" > /srv/site/index.html \
+    && case "$HEALTHY" in \
+         yes) ;; \
+         no) rm /srv/site/index.html ;; \
+         *) echo "HEALTHY must be yes or no" >&2; exit 1 ;; \
+       esac
 
 FROM app AS service
 LABEL org.opencontainers.image.source="https://github.com/btvn-tuan-nd/container-mutator"
-ARG RUNTIME_ID=counter-alpine3.22-v1
+ARG RUNTIME_ID=counter-nginx-alpine3.22-v1
 ARG TARGETARCH
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates nginx
 ADD downloads/${TARGETARCH}/s6-overlay-noarch.tar.xz /
 ADD downloads/${TARGETARCH}/s6-overlay-arch.tar.xz /
 ADD downloads/${TARGETARCH}/mutator.tar.gz /
-COPY rootfs/ /
-RUN set -eux; \
-    find /etc/s6-overlay/s6-rc.d/counter -type d -exec chmod 0755 {} \; ; \
-    find /etc/s6-overlay/s6-rc.d/counter -type f -exec chmod 0644 {} \; ; \
-    chmod 0755 \
-      /etc/s6-overlay/s6-rc.d/counter/run \
-      /etc/s6-overlay/s6-rc.d/counter/finish \
-      /etc/s6-overlay/s6-rc.d/counter/data/check
+COPY nginx.conf /etc/nginx/nginx.conf
+ENV MUTATOR_APP_DIR=/srv/site
+ENV MUTATOR_COMMAND="exec /usr/sbin/nginx -g 'daemon off;'" \
+    MUTATOR_CHECK="wget -q -O /dev/null http://127.0.0.1:8080/"
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENV MUTATOR_RUNTIME=$RUNTIME_ID
+EXPOSE 8080
 ENTRYPOINT ["/init"]
+CMD []
 
 # Unified single-layer /app snapshot: app/ is the layer root.
 FROM app AS snapshot
-RUN tar -C / -cf /app.tar app
+RUN mkdir /snapshot && cp -a /srv/site /snapshot/app \
+    && tar -C /snapshot -cf /app.tar app
 
 FROM scratch AS payload
 COPY --from=snapshot /app.tar /app.tar

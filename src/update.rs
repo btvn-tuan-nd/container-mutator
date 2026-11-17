@@ -2,10 +2,9 @@
 //! switch the mutable bundle through journal-backed release transitions.
 
 use std::fs;
-use std::path::Path;
 use std::thread;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::extract;
@@ -17,12 +16,24 @@ use crate::releases::{Pending, Selection, Store};
 
 /// s6 oneshot: recover release state before every mutable service starts.
 pub fn prepare() -> Result<()> {
-    if Config::from_env()?.is_none() {
+    // The single-app archive opts into validation, including when updates are disabled.
+    let preset = std::path::Path::new("/etc/s6-overlay/s6-rc.d/mutator-app/data");
+    if preset.join("preset").exists() {
+        crate::paths::from_env()?;
+        anyhow::ensure!(
+            std::process::Command::new(preset.join("dispatch"))
+                .arg("validate")
+                .status()
+                .context("cannot validate single-app configuration")?
+                .success(),
+            "invalid single-app configuration"
+        );
+    }
+    let Some(config) = Config::from_env()? else {
         clear_trial()?;
         return Ok(());
-    }
-    ensure_no_mounts()?;
-    let store = Store::default();
+    };
+    let store = Store::new(config.app_dir)?;
     store
         .initialize()
         .context("cannot initialize release state before services start")?;
@@ -35,12 +46,12 @@ pub fn prepare() -> Result<()> {
 
 /// s6 longrun: own bundle transitions but never the normal service supervision.
 pub fn watch() -> Result<()> {
-    let Ok(Some(config)) = Config::from_env() else {
+    let Some(config) = Config::from_env()? else {
         eprintln!("mutator: updates disabled because MUTATOR_IMAGE is unset");
         idle()
     };
     std::env::set_current_dir("/").context("cannot change to /")?;
-    let store = Store::default();
+    let store = Store::new(config.app_dir.clone())?;
     let _lock = store
         .lock()
         .context("another updater owns the release lock")?;
@@ -198,23 +209,4 @@ fn switch(store: &Store, lifecycle: &Lifecycle, pending: &Pending) -> Result<()>
     lifecycle.start()?;
     // A candidate that crashes after becoming ready must not commit.
     lifecycle.ready()
-}
-
-/// Moving or pruning a release must never traverse user data mounts.
-fn ensure_no_mounts() -> Result<()> {
-    for line in fs::read_to_string("/proc/self/mountinfo")?.lines() {
-        let mount = Path::new(
-            line.split_ascii_whitespace()
-                .nth(4)
-                .context("invalid mountinfo")?,
-        );
-        for root in ["/app", "/var/lib/mutator"] {
-            // Component-wise comparison: /apple does not match /app.
-            ensure!(
-                !mount.starts_with(root),
-                "update mode does not allow mounts at or below {root}; keep persistent data elsewhere"
-            );
-        }
-    }
-    Ok(())
 }

@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+data=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+resolve() {
+    action=$1
+    hook="$data/$action-hook"
+    command=
+    if [ ! -e "$hook" ] && [ -e "$data/preset" ]; then
+        hook="/etc/mutator/$action"
+        case "$action" in
+            run) command=${MUTATOR_COMMAND:-} ;;
+            check) command=${MUTATOR_CHECK:-} ;;
+            cleanup) command=${MUTATOR_CLEANUP:-} ;;
+        esac
+    fi
+    if [ -e "$hook" ]; then
+        if [ ! -f "$hook" ] || [ ! -x "$hook" ]; then
+            echo "mutator: $hook must be an executable file" >&2
+            exit 1
+        fi
+    elif [ -z "$(printf '%s' "$command" | tr -d '[:space:]')" ] && [ "$action" != cleanup ]; then
+        echo "mutator: configure $action with an executable /etc/mutator/$action script or MUTATOR_COMMAND/MUTATOR_CHECK" >&2
+        exit 1
+    fi
+}
+if [ "${1:-}" = validate ]; then
+    resolve run
+    resolve check
+    resolve cleanup
+    exit 0
+fi
+resolve "$1"
+# Cleanup stays outside the replaceable directory, even after application exit.
+if [ "$1" != cleanup ]; then cd -- "${MUTATOR_APP_DIR:-/app}"; fi
+if [ -e "$hook" ]; then exec "$hook"; fi
+if [ -n "$command" ]; then exec /bin/sh -c "$command"; fi

@@ -1,0 +1,2 @@
+#!/command/with-contenv /bin/sh
+exec /command/s6-notifyoncheck -d -s 3000 -T 30000 -t 5000 -w 250 -n 0 ./data/launch

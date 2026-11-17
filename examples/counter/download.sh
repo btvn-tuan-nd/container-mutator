@@ -1,18 +1,22 @@
 #!/bin/sh
-# Download and verify the three archives used by the service Dockerfile.
+# Download verified s6 and mutator archives, or use a trusted local mutator archive.
 set -eu
+# A trusted local archive can override the published release for development.
+archive=
+if [ -n "${MUTATOR_ARCHIVE:-}" ]; then
+    archive=$(realpath "$MUTATOR_ARCHIVE")
+    test -f "$archive"
+fi
 case "${PLATFORM:-$(uname -m)}" in
     linux/amd64|x86_64|amd64)
         arch=amd64
         s6_arch=x86_64
         s6_sha=e6befcc96a437a3831386ecfc51808c5d3e939dc5fe3c02ae9284599e8aa2408
-        mutator_sha=47abb2ae4c7ab7402b5507f60e18f104e3140c8857d0d6f679453293db95b74f
         ;;
     linux/arm64|aarch64|arm64)
         arch=arm64
         s6_arch=aarch64
         s6_sha=b17f17a82e7a515c682a91edaf2ffdabb73f891981b6c1fd712115693a2f8b4c
-        mutator_sha=df7ccbbff4a3d4234f5aa3be733a72edc96b82bf7a911d48ea7bcae29d4aaa9e
         ;;
     *) echo "Unsupported platform; use linux/amd64 or linux/arm64" >&2; exit 1 ;;
 esac
@@ -37,10 +41,18 @@ for part in noarch arch; do
     fi
     verify "$checksum" "$file"
 done
-if ! verify "$mutator_sha" mutator.tar.gz >/dev/null 2>&1; then
-    # The repository is private: authenticate downloads on the host.
-    gh release download v0.1.0 --repo btvn-tuan-nd/container-mutator \
-        --pattern "container-mutator-integration-linux-$arch.tar.gz" \
-        --output mutator.tar.gz --clobber
+if [ -n "$archive" ]; then
+    cp "$archive" mutator.tar.gz
+else
+    version=${MUTATOR_VERSION:-0.2.0}
+    release="https://github.com/btvn-tuan-nd/container-mutator/releases/download/v$version"
+    file="container-mutator-single-app-linux-$arch.tar.gz"
+    curl -fLsS "$release/SHA256SUMS-$arch" -o SHA256SUMS
+    curl -fLsS "$release/$file" -o "$file"
+    awk -v name="$file" '$2 == name' SHA256SUMS | sha256sum -c -
+    cp "$file" mutator.tar.gz
 fi
-verify "$mutator_sha" mutator.tar.gz
+if ! tar -tzf mutator.tar.gz | grep -q '^\./etc/s6-overlay/s6-rc.d/mutator-app/data/preset$'; then
+    echo 'Mutator archive must be the single-app tarball' >&2
+    exit 1
+fi

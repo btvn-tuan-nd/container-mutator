@@ -10,6 +10,7 @@ pub struct Limits {
 /// Update settings read from the native inherited environment.
 pub struct Config {
     pub image: String,
+    pub app_dir: std::path::PathBuf,
     pub runtime: String,
     pub limits: Limits,
     pub interval: Duration,
@@ -50,7 +51,12 @@ impl Config {
                 .is_some_and(|millis| millis <= u64::from(u32::MAX)),
             "MUTATOR_TIMEOUT exceeds the s6 timeout range"
         );
+        let app_dir = value("MUTATOR_APP_DIR")?
+            .map(Into::into)
+            .unwrap_or_else(crate::paths::default_app_dir);
+        crate::paths::validate(&app_dir)?;
         Ok(Some(Self {
+            app_dir,
             image,
             runtime,
             limits: Limits {
@@ -124,6 +130,35 @@ mod tests {
             ("MUTATOR_INSECURE_REGISTRY", "yes"),
         ] {
             assert!(update(&[(key, value)]).is_err(), "{key}={value}");
+        }
+    }
+    #[test]
+    fn app_directory_defaults_and_protected_paths_are_checked() {
+        let values = [
+            ("MUTATOR_IMAGE", "registry.example/app:live"),
+            ("MUTATOR_RUNTIME", "base-1"),
+        ];
+        assert_eq!(
+            configured(&values).unwrap().unwrap().app_dir,
+            std::path::Path::new("/app")
+        );
+        let mut custom = values.to_vec();
+        custom.push(("MUTATOR_APP_DIR", "/srv/site"));
+        assert_eq!(
+            configured(&custom).unwrap().unwrap().app_dir,
+            std::path::Path::new("/srv/site")
+        );
+        for path in [
+            "",
+            "relative",
+            "/",
+            "/etc/s6-overlay",
+            "/opt/mutator",
+            "/var/lib/mutator",
+            "/srv/../etc",
+        ] {
+            custom[2] = ("MUTATOR_APP_DIR", path);
+            assert!(configured(&custom).is_err(), "{path}");
         }
     }
 }

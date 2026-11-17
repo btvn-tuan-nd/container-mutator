@@ -2,7 +2,7 @@
 # Local demo: publish.sh runtime, then NUMBER=2 publish.sh update.
 set -eu
 
-runtime_id=counter-alpine3.22-v1
+runtime_id=counter-nginx-alpine3.22-v1
 crane=${CRANE:-crane}
 repo="${REGISTRY:-localhost:5000}/container-mutator-counter"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

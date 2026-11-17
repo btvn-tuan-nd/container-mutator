@@ -1,7 +1,9 @@
 mod config;
 mod error;
 mod extract;
+mod install;
 mod lifecycle;
+mod paths;
 mod registry;
 mod releases;
 mod update;
@@ -14,7 +16,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "mutator",
     version,
-    about = "Apply optional /app snapshot updates under native s6"
+    about = "Apply application snapshot updates under native s6"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,12 +29,15 @@ enum Action {
     Prepare,
     /// Watch the configured image and switch mutable services (s6 longrun).
     Watch,
+    /// Generate native s6 definitions at image build time.
+    InstallService(install::Options),
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Action::Prepare => update::prepare(),
         Action::Watch => update::watch(),
+        Action::InstallService(options) => install::install(&options),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

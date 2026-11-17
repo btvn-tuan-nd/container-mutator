@@ -25,6 +25,8 @@ services:
   counter:
     profiles: ["update-demo"]
     image: localhost:5000/container-mutator-counter:runtime
+    ports:
+      - "127.0.0.1:8080:8080"
     environment:
       MUTATOR_IMAGE: registry:5000/container-mutator-counter:live
       MUTATOR_INSECURE_REGISTRY: "true"
