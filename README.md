@@ -34,7 +34,7 @@ docker build --target service -t mutator-counter:local examples/counter
 docker run --rm -p 127.0.0.1:8080:8080 mutator-counter:local
 ```
 
-Open `http://127.0.0.1:8080/` to read the baked-in counter value, with updates disabled. The Compose flow above enables registry polling. Set `PLATFORM=linux/arm64` when downloading for ARM64 and pass `--platform linux/arm64` to the build.
+Open `http://127.0.0.1:8080/` to read the baked-in counter value, with updates disabled. The Compose flow above enables registry polling. Published releases currently provide AMD64 assets only. ARM64 can still be built from source with `--platform linux/arm64` and supplied through `MUTATOR_ARCHIVE`.
 
 `NUMBER=3 HEALTHY=no ./examples/counter/publish.sh update` publishes a snapshot without an index page, exercising HTTP readiness failure and rollback. The registry on `localhost:5000` is unauthenticated HTTP, for local testing only.
 
@@ -52,7 +52,7 @@ The workflow builds the current single-app tarball first. The demo checks the va
 
 ## Install: s6-overlay, then mutator
 
-Download the s6-overlay noarch and architecture tarballs, plus the matching mutator single-app tarball from [releases](https://github.com/btvn-tuan-nd/container-mutator/releases). Verify their checksums before installing. The [example download script](examples/counter/download.sh) downloads and verifies both projects for AMD64 or ARM64. Set `MUTATOR_VERSION` to select a release, or `MUTATOR_ARCHIVE` to use a trusted local mutator archive.
+Download the s6-overlay noarch and architecture tarballs, plus the matching mutator single-app tarball from [releases](https://github.com/btvn-tuan-nd/container-mutator/releases). Verify their checksums before installing. The [example download script](examples/counter/download.sh) downloads and verifies the published AMD64 assets. Set `MUTATOR_VERSION` to select a release, or `MUTATOR_ARCHIVE` to use a trusted local mutator archive.
 
 Extract all three into the image root. Docker automatically extracts **local** tarballs with `ADD`:
 
@@ -83,7 +83,7 @@ tar -C / -Jxpf s6-overlay-x86_64.tar.xz
 tar -C / -xzpf container-mutator-single-app-linux-amd64.tar.gz
 ```
 
-Both mutator tarballs contain the binary, crane, and prepare/watch service definitions. The **single-app** tarball additionally supplies one `mutator-app` service and its bundle wiring. The **integration** tarball leaves application definitions to you, for existing s6 setups or multiple services. Install one variant. Both use the same service templates as `install-service`. The cleanup script targets s6-overlay 3.2.3.2, which the example pins. Use the `aarch64` s6 archive and `arm64` mutator archive for ARM64.
+Both mutator tarballs contain the binary, crane, and prepare/watch service definitions. The **single-app** tarball additionally supplies one `mutator-app` service and its bundle wiring. The **integration** tarball leaves application definitions to you, for existing s6 setups or multiple services. Install one variant. Both use the same service templates as `install-service`. The cleanup script targets s6-overlay 3.2.3.2, which the example pins. ARM64 release assets are currently omitted; source builds retain ARM64 support.
 
 `nginx.conf` should serve `/srv/site` on port 8080, as in the [counter config](examples/counter/nginx.conf). Set `MUTATOR_IMAGE` when running the container to enable updates; leave it unset to run the baked-in application. Keep `/init` as the entrypoint.
 
