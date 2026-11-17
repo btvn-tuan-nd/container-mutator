@@ -21,5 +21,18 @@ services:
       retries: 10
       start_period: 5s
 
+  # Published by examples/counter/publish.sh runtime; see README.
+  counter:
+    profiles: ["update-demo"]
+    image: localhost:5000/container-mutator-counter:runtime
+    environment:
+      MUTATOR_IMAGE: registry:5000/container-mutator-counter:live
+      MUTATOR_INSECURE_REGISTRY: "true"
+      MUTATOR_POLL_INTERVAL: "2"
+      MUTATOR_TIMEOUT: "6"
+    depends_on:
+      registry:
+        condition: service_healthy
+
 volumes:
   registry-data:

@@ -1,0 +1,3 @@
+#!/bin/sh
+test "$(cat /app/healthy 2>/dev/null)" = yes &&
+test "$(cat /run/counter-value 2>/dev/null)" = "$(cat /app/number 2>/dev/null)"

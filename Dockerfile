@@ -1,54 +1,17 @@
 # syntax=docker/dockerfile:1
 #
-# container-mutator: s6-overlay base plus the statically linked mutator executable.
-#
-# Optional pinned development tooling (Nix with nix-command and flakes enabled):
-#   nix develop path:.
-#   cargo test --locked
-#   cargo clippy --locked --all-targets -- -D warnings
-#   cargo fmt --check
-# path:. includes untracked files; use . once tracked in Git.
-# flake.lock pins development tools only. Docker builds do not require Nix.
-# Compose builds current source directly; exporting an archive is optional.
+# container-mutator: one static binary plus minimal s6-rc integration.
 #
 # Targets:
-#   final    (default) Alpine convenience image; `docker compose up -d --build mutator`.
-#   overlay  scratch image containing only the installed s6/mutator files, usable
-#            with COPY --from=<image> / /.
-#   artifact BuildKit local export with the installable tarball and SHA256SUMS.
+#   final     (default) Alpine convenience image with pinned s6-overlay and /init.
+#   artifact  local export: raw `mutator`, integration tarball, SHA256SUMS.
+#   overlay   scratch image with only the integration root.
 #
-# Export an installable archive (separate output directories per platform):
-#   docker buildx build --platform linux/amd64 --target artifact --output type=local,dest=dist/amd64 .
-#   docker buildx build --platform linux/arm64 --target artifact --output type=local,dest=dist/arm64 .
-# Install into an Alpine or Debian root (the archive has no distro base files):
-#   ( cd dist/amd64 && sha256sum -c SHA256SUMS )
-#   tar -C / -xzf dist/amd64/container-mutator-linux-amd64.tar.gz
-# Then run it as PID 1 with no extra init:
-#   ENTRYPOINT ["/opt/mutator/bin/mutator", "boot", "--"]
-#   CMD ["your", "foreground", "command", "arg"]
-#
-# boot execs /init after saving argv/cwd/environment in /run/mutator/boot.json;
-# This private, versioned state is regenerated on boot, not a configuration API.
-# /run must be writable before boot and allow execution for s6's runtime files.
-# `boot` must be PID 1 (no Docker --init). s6 supervises mutator-app, which runs
-# `mutator launch` and execs the saved command. Applications must be foreground,
-# noninteractive, and keep stdout/stderr inherited. A normal app exit is restarted
-# by s6; container shutdown is bounded by mutator-app/timeout-kill and
-# flag-timeout-killpg (SIGKILL to the app's process group after 5 s).
-# For a read-only root: -e S6_READ_ONLY_ROOT=1 --tmpfs /run:exec
-# For a non-root USER, /run must also be writable by that UID/GID.
-# Re-state an inherited CMD after replacing ENTRYPOINT; Docker otherwise clears it.
-#
-# Licenses: the pinned s6-overlay release tarballs carry no license files. Verbatim
-# upstream COPYING notices for every bundled project are installed at
-# /opt/mutator/share/licenses/<project>-<version>/COPYING:
-#   s6-overlay-3.2.3.2, s6-overlay-helpers-0.1.2.2
-#       just-containers/<project> tag v<version>
-#   skalibs-2.15.1.0, execline-2.9.9.2, s6-2.15.1.0, s6-rc-0.7.0.0,
-#   s6-linux-init-1.2.0.2, s6-linux-utils-2.6.4.1,
-#   s6-portable-utils-2.3.1.2, s6-networking-2.8.0.1, s6-dns-2.4.1.3
-#       skarnet/<project> tag v<version>
-# Source URL: https://raw.githubusercontent.com/<owner>/<project>/<tag>/COPYING
+# Install the integration artifact into an existing s6-overlay image.
+# It adds prepare/watch services, not /init or an application launcher.
+# Applications own readiness and cleanup; put `mutable-app` in `user2`.
+# s6 retains its upstream license files; crane's license is under
+# /opt/mutator/share/licenses/crane-0.22.1.
 
 FROM rust:1-alpine AS build
 ARG TARGETARCH
@@ -67,8 +30,45 @@ RUN case "$TARGETARCH" in \
     && mkdir /out \
     && cp "target/$target/release/mutator" /out/mutator
 
-# Assemble into an empty root so the overlay contains no Alpine base files.
-FROM alpine:3.22 AS rootfs
+# crane is an external dependency, optionally distributed with mutator.
+FROM alpine:3.22 AS crane
+ARG TARGETARCH
+RUN apk add --no-cache curl
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) crane_arch=x86_64; crane_checksum=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0 ;; \
+      arm64) crane_arch=arm64; crane_checksum=898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110 ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --show-error --silent \
+      "https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_${crane_arch}.tar.gz" \
+      --output /tmp/crane.tar.gz; \
+    printf '%s  %s\n' "$crane_checksum" /tmp/crane.tar.gz | sha256sum -c -; \
+    mkdir -p /out/opt/mutator/bin /out/opt/mutator/share/licenses/crane-0.22.1; \
+    tar -C /tmp -xzf /tmp/crane.tar.gz crane LICENSE; \
+    cp /tmp/crane /out/opt/mutator/bin/crane; \
+    cp /tmp/LICENSE /out/opt/mutator/share/licenses/crane-0.22.1/LICENSE; \
+    chmod 0755 /out/opt/mutator/bin/crane
+
+# Integration root: binary, crane, and reference s6-rc definitions only.
+FROM alpine:3.22 AS integration
+COPY --from=build /out/mutator /root/opt/mutator/bin/mutator
+COPY --from=crane /out/ /root/
+COPY overlay/rootfs/ /root/
+RUN set -eux; \
+    tree=/root/etc/s6-overlay; \
+    find "$tree" -type d -exec chmod 0755 {} \; ; \
+    find "$tree" -type f -exec chmod 0644 {} \; ; \
+    chmod 0755 "$tree/s6-rc.d/mutator-watch/run" /root/opt/mutator/bin/*; \
+    find /root/opt/mutator/share/licenses -type d -exec chmod 0755 {} \; ; \
+    find /root/opt/mutator/share/licenses -type f -exec chmod 0644 {} \;
+
+FROM scratch AS overlay
+COPY --from=integration /root/ /
+
+# s6-overlay is installed only by runnable convenience/example images, never
+# into the integration artifact.
+FROM alpine:3.22 AS s6-overlay
 ARG TARGETARCH
 RUN apk add --no-cache curl xz
 RUN set -eux; \
@@ -88,48 +88,28 @@ RUN set -eux; \
     mkdir -p /rootfs; \
     tar -C /rootfs -Jxpf /tmp/s6-overlay-noarch.tar.xz; \
     tar -C /rootfs -Jxpf /tmp/s6-overlay-arch.tar.xz
-COPY overlay/rootfs/ /rootfs/
-COPY --from=build /out/mutator /rootfs/opt/mutator/bin/mutator
-# Normalize only mutator-owned paths, preserving upstream s6 metadata.
-RUN set -eux; \
-    chmod 0755 \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/dependencies.d \
-      /rootfs/opt \
-      /rootfs/opt/mutator \
-      /rootfs/opt/mutator/bin \
-      /rootfs/opt/mutator/share \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/run \
-      /rootfs/opt/mutator/bin/mutator; \
-    find /rootfs/opt/mutator/share/licenses -type d -exec chmod 0755 {} \; ; \
-    chmod 0644 \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/type \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/timeout-kill \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/flag-timeout-killpg \
-      /rootfs/etc/s6-overlay/s6-rc.d/mutator-app/dependencies.d/base \
-      /rootfs/etc/s6-overlay/user-bundles.d/user/contents.d/mutator-app; \
-    find /rootfs/opt/mutator/share/licenses -type f -exec chmod 0644 {} \;
 
-FROM scratch AS overlay
-COPY --from=rootfs /rootfs/ /
-
-FROM alpine:3.22 AS archive
+FROM alpine:3.22 AS export
 ARG TARGETARCH
-COPY --from=overlay / /overlay
+COPY --from=build /out/mutator /mutator
+COPY --from=integration /root/ /integration/
 RUN set -eux; \
     mkdir -p /out; \
-    tarball="container-mutator-linux-${TARGETARCH}.tar.gz"; \
-    tar -C /overlay -czf "/out/${tarball}" .; \
+    tarball="container-mutator-integration-linux-${TARGETARCH}.tar.gz"; \
+    tar -C /integration -czf "/out/${tarball}" .; \
+    cp /mutator /out/mutator; \
     cd /out; \
-    sha256sum "$tarball" > SHA256SUMS
+    sha256sum "$tarball" mutator > SHA256SUMS
 
 FROM scratch AS artifact
-COPY --from=archive /out/ /
+COPY --from=export /out/ /
 
 FROM alpine:3.22 AS final
+# Crane uses the target system trust store; the convenience image ships one.
+RUN apk add --no-cache ca-certificates
+COPY --from=s6-overlay /rootfs/ /
 COPY --from=overlay / /
 # Fail container startup if an s6-rc initialization service fails.
 ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
-# boot captures this CMD, then execs /init; mutator-app replays CMD under s6.
-ENTRYPOINT ["/opt/mutator/bin/mutator", "boot", "--"]
+ENTRYPOINT ["/init"]
 CMD ["/bin/sh", "-c", "trap 'exit 0' TERM INT; i=0; while :; do i=$((i+1)); echo \"container-mutator demo tick $i\"; sleep 1; done"]

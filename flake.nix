@@ -27,6 +27,7 @@
               rust-analyzer
               nixfmt
               docker-client
+              crane
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };
