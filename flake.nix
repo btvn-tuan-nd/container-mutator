@@ -28,6 +28,7 @@
               nixfmt
               docker-client
               crane
+              gh
             ];
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };

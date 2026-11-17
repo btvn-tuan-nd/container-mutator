@@ -7,44 +7,83 @@ Mutator polls, extracts complete snapshots, and journals release switches. **s6 
 ## Try it locally
 
 ```sh
-nix develop path:.                         # optional devshell: Rust, Docker, crane
+nix develop path:.                         # optional devshell: Rust, Docker, crane, gh
 
 docker compose up -d --wait registry
-./examples/counter/publish.sh runtime      # s6 service image + mutator integration
+./examples/counter/publish.sh runtime      # installs the published mutator v0.1.0
 ./examples/counter/publish.sh update
 docker compose --profile update-demo up -d --pull always counter
 NUMBER=2 ./examples/counter/publish.sh update
 docker compose logs -f counter
 ```
 
+The example installs s6-overlay, then mutator, by extracting their release tarballs into `/`. `publish.sh runtime` runs [download.sh](examples/counter/download.sh) to download and verify the archives first. Since this repository is private, run `gh auth login` once. No Rust build is needed.
+
+To build and run locally without publishing:
+
+```sh
+./examples/counter/download.sh
+docker build --target service -t mutator-counter:local examples/counter
+docker run --rm mutator-counter:local
+```
+
+This runs the baked-in counter with updates disabled. The Compose flow above enables registry polling. Set `PLATFORM=linux/arm64` when downloading for ARM64 and pass `--platform linux/arm64` to the build.
+
 `NUMBER=3 HEALTHY=no` exercises readiness rollback; `HEALTHY=crash` exercises startup-crash rejection. The registry on `localhost:5000` is unauthenticated HTTP, for local testing only.
 
-## Install into an s6 image
+## Demo with GitHub Container Registry
+
+Run the **GHCR counter demo** workflow from the Actions tab, or:
 
 ```sh
-docker buildx build --platform linux/amd64 --target artifact \
-  --output type=local,dest=dist/amd64 .
-(cd dist/amd64 && sha256sum -c SHA256SUMS)
+gh workflow run counter-demo.yml
 ```
 
-Or download a prebuilt tarball from [releases](https://github.com/OWNER/container-mutator/releases) (adjust `OWNER` to this repository's location; requires s6-overlay ≥ 3.2.1.0, which introduced `user-bundles.d` — Alpine's `s6-overlay` package is currently older, so install from the official tarballs), verify it, and install it like the local build:
+It uses the workflow's registry credentials to publish private images at `ghcr.io/<repository-owner>/container-mutator-counter`. It starts counter 1, updates to 2, rejects an unhealthy 3 and restores 2, then updates to 4—all within the same container. The Actions summary records the result. Test containers are removed; the `runtime` and `live` images remain in GHCR. No personal registry token is required for this workflow.
 
-```sh
-wget https://github.com/OWNER/container-mutator/releases/download/v0.1.0/container-mutator-integration-linux-amd64.tar.gz
-echo "<sha256 from SHA256SUMS-amd64>  container-mutator-integration-linux-amd64.tar.gz" | sha256sum -c -
-```
+The workflow runs on GitHub's runner. Pulling these private images on your own machine additionally requires GHCR read access.
 
-The archive installs mutator, pinned crane, and two native s6 service definitions. **It does not contain s6 or `/init`.** Use the matching `arm64` build for ARM64.
+## Install: s6-overlay, then mutator
 
-For an existing s6-overlay image:
+Download the s6-overlay noarch and architecture tarballs, plus the matching mutator integration tarball from [releases](https://github.com/btvn-tuan-nd/container-mutator/releases). Verify their checksums before installing. The [example download script](examples/counter/download.sh) does this for AMD64 or ARM64.
+
+Extract all three into the image root. Docker automatically extracts **local** tarballs with `ADD`:
 
 ```dockerfile
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates
+
+ADD s6-overlay-noarch.tar.xz /
+ADD s6-overlay-x86_64.tar.xz /
 ADD container-mutator-integration-linux-amd64.tar.gz /
+
+COPY app/ /app/
+COPY rootfs/ /
 ENV MUTATOR_RUNTIME=my-base-v1 S6_BEHAVIOUR_IF_STAGE2_FAILS=2
 ENTRYPOINT ["/init"]
 ```
 
-Alternatively, copy the raw binary to `/opt/mutator/bin/mutator`, install crane at `/opt/mutator/bin/crane`, and copy the reference definitions from `overlay/rootfs/etc/s6-overlay/`. The image supplies s6-overlay, `/bin/sh`, and CA certificates. The convenience `final` Docker target installs s6-overlay separately; the reference version is 3.2.3.2.
+If s6-overlay is already installed, add just the mutator tarball. The equivalent manual extraction into an image root is:
+
+```sh
+tar -C / -Jxpf s6-overlay-noarch.tar.xz
+tar -C / -Jxpf s6-overlay-x86_64.tar.xz
+tar -C / -xzpf container-mutator-integration-linux-amd64.tar.gz
+```
+
+Mutator's tarball contains its binary, crane, and the prepare/watch service definitions. Use s6-overlay ≥ 3.2.1.0; the example pins 3.2.3.2. Use the `aarch64` s6 archive and `arm64` mutator archive for ARM64.
+
+`rootfs/` supplies your application's s6 service definitions, as described below. Set `MUTATOR_IMAGE` when running the container to enable updates; leave it unset to run the baked-in application. Keep `/init` as the entrypoint.
+
+For this private repository, download mutator with your authenticated GitHub CLI before building:
+
+```sh
+gh release download v0.1.0 --repo btvn-tuan-nd/container-mutator \
+  --pattern 'container-mutator-integration-linux-amd64.tar.gz'
+echo "47abb2ae4c7ab7402b5507f60e18f104e3140c8857d0d6f679453293db95b74f  container-mutator-integration-linux-amd64.tar.gz" | sha256sum -c -
+```
+
+The root Dockerfile builds the release artifacts from source. Consumer images only need the tarballs.
 
 ### Application service contract
 
